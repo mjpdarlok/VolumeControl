@@ -3,6 +3,7 @@ Application to automatically change the volume of applications in Windows to a s
 when the application window is in focus or loses focus. Useful for fully or partially muting
 applications when the window moves to the background.
 '''
+import os
 import psutil
 import pygetwindow
 import pythoncom
@@ -130,21 +131,33 @@ class App:
 
     def monitor_active_window(self):
         last_active_window = None
+        last_exe: str = ''
         while True:
             current_active_window = pygetwindow.getActiveWindow()
             if current_active_window is not None:
                 current_window_title = current_active_window.title
                 if current_window_title != last_active_window:
+                    last_active_window = current_window_title
+                    active_exe_path = get_active_window_exe()
+                    try:
+                        active_exe = os.path.basename(active_exe_path)
+                    except TypeError:
+                        continue
                     for key in self.all_apps.keys():
                         session = self.all_apps[key]['session']
                         volume = session._ctl.QueryInterface(ISimpleAudioVolume)
                         query = f'SELECT * FROM tbl_volume WHERE application_name = "{key}";'
                         query_result = db_execute(query)
-                        if key == get_active_window_exe():
-                            volume.SetMasterVolume(int(query_result[0][2])/100 if query_result else 1, None)
-                        else:
-                            volume.SetMasterVolume(int(query_result[0][3])/100 if query_result else 1, None)
-                    last_active_window = current_window_title
+                        if key == active_exe:
+                            new_volume = int(query_result[0][2])/100 if query_result else 1
+                            print(f'setting {key} to {new_volume}')
+                            volume.SetMasterVolume(new_volume, None)
+                        elif key == last_exe:
+                            new_volume = int(query_result[0][3])/100 if query_result else 1
+                            print(f'setting {key} to {new_volume}')
+                            volume.SetMasterVolume(new_volume, None)
+                    last_exe = active_exe
+
             sleep(1)
 
 
