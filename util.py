@@ -3,6 +3,7 @@ import win32gui
 import win32process
 import win32api
 import win32con
+from contextlib import closing
 
 
 def get_active_window_exe():
@@ -21,12 +22,7 @@ def get_active_window_exe():
         return None
 
 
-def db_execute(query: str):
-    db_conn = sqlite3.connect('volume_control.db')
-    db_cursor = db_conn.cursor()
-    db_cursor.execute(query)
-    db_conn.commit()
-    result = db_cursor.fetchall()
-    db_cursor.close()
-    db_conn.close()
-    return result
+def db_execute(query: str, params: tuple = ()):
+    with closing(sqlite3.connect('volume_control.db')) as conn:
+        with conn:  # commits on success, rolls back on error
+            return conn.execute(query, params).fetchall()
