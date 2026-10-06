@@ -9,6 +9,7 @@ import pygetwindow
 import pythoncom
 import threading
 import tkinter
+import queue
 from tkinter import ttk
 from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
 from time import sleep
@@ -103,37 +104,48 @@ class App:
     all_apps: dict
 
     def __init__(self):
-        thread_tk = threading.Thread(target=self.init_tk)
-        thread_tk.start()
-        self.all_apps = {}
-        sleep(2)
-        thread_find = threading.Thread(target=self.find_apps)
-        thread_find.start()
-        self.monitor_active_window()
+        self.known_apps = set()        # only touched by the find_apps thread
+        self.new_rows = queue.Queue()  # worker thread -> Tk thread
+        self.init_tk()
+        # daemon=True so closing the window actually exits the program
+        threading.Thread(target=self.find_apps, daemon=True).start()
+        threading.Thread(target=self.monitor_active_window, daemon=True).start()
+        self.tk_root.after(200, self.poll_queue)
+        self.tk_root.mainloop()  # blocks on the main thread
 
     def init_tk(self):
         self.tk_root = tkinter.Tk()
         self.tk_root.title('VolumeControl')
         tbl_cols = ['Application', 'Volume (FG)', 'Volume (BG)', ]
         self.tk_tree = EditableTreeview(self.tk_root, columns=tbl_cols, show='headings')
-        self.tk_tree.heading('Application', text='Application')
-        self.tk_tree.heading('Volume (FG)', text='Volume (FG)')
-        self.tk_tree.heading('Volume (BG)', text='Volume (BG)')
+        for col in tbl_cols:
+            self.tk_tree.heading(col, text=col)
         self.tk_tree.pack(expand=True, fill='both')
-        self.tk_root.mainloop()
+
+    def poll_queue(self):
+        """Runs on the Tk thread: drain the queue and insert rows."""
+        try:
+            while True:
+                row = self.new_rows.get_nowait()
+                self.tk_tree.insert('', tkinter.END, values=row)
+        except queue.Empty:
+            pass
+        self.tk_root.after(200, self.poll_queue)
 
     def find_apps(self):
         pythoncom.CoInitialize()
         while True:
-            sessions = AudioUtilities.GetAllSessions()
-            for session in sessions:
-                if session.Process:
-                    process_name = session.Process.name()
-                    if process_name not in self.all_apps:
-                        volume_fg, volume_bg = get_volumes(process_name)
-                        self.all_apps[process_name] = {}
-                        self.tk_tree.insert('', tkinter.END, values=(process_name, volume_fg, volume_bg))
-                        self.tk_tree.update_idletasks()
+            for session in AudioUtilities.GetAllSessions():
+                try:
+                    if not session.Process:
+                        continue
+                    name = session.Process.name()
+                except psutil.Error:
+                    continue
+                if name not in self.known_apps:
+                    self.known_apps.add(name)
+                    fg, bg = get_volumes(name)
+                    self.new_rows.put((name, fg, bg))  # no Tk calls here
             sleep(10)
 
     def apply_volumes(self, active_exe, last_exe):
@@ -144,40 +156,30 @@ class App:
                 name = session.Process.name()
             except psutil.Error:
                 continue
-
             if name not in (active_exe, last_exe):
                 continue
-
             fg, bg = get_volumes(name)
             new_volume = (fg if name == active_exe else bg) / 100
             print(f'setting {name} to {new_volume}')
             session.SimpleAudioVolume.SetMasterVolume(new_volume, None)
 
     def monitor_active_window(self):
+        pythoncom.CoInitialize()
         last_title = None
         last_exe = ''
-        active_exe = ''
         last_pids = set()
 
         while True:
             window = pygetwindow.getActiveWindow()
-            if window is not None:
-                exe_path = get_active_window_exe()
-                if exe_path:
-                    active_exe = os.path.basename(exe_path)
-
-                    # Also detect new audio sessions (e.g. a reopened app)
-                    pids = set()
-                    for s in AudioUtilities.GetAllSessions():
-                        pids.add(s.ProcessId)
-
-                    if window.title != last_title or pids != last_pids:
-                        self.apply_volumes(active_exe, last_exe)
-                        if window.title != last_title:
-                            last_title = window.title
-                        last_pids = pids
-                        if active_exe != last_exe:
-                            last_exe = active_exe
+            exe_path = get_active_window_exe() if window is not None else None
+            if exe_path:
+                active_exe = os.path.basename(exe_path)
+                pids = {s.ProcessId for s in AudioUtilities.GetAllSessions()}
+                if window.title != last_title or pids != last_pids:
+                    self.apply_volumes(active_exe, last_exe)
+                    last_title = window.title
+                    last_pids = pids
+                    last_exe = active_exe
             sleep(2 / 3)
 
 
